@@ -1,6 +1,6 @@
 // Configuration object
 const config = {
-  production: true, // Set to false for testing, true for production use
+  production: false, // Set to false for testing, true for production use
   testfolder: '1z38V8POr9lXNAoFBM-7I5_8GG9t5E2wx', // ID of the folder containing test data
   realfolder: '1k0FhOtK-3_mGoH5CnC9axY2l2FsP7h1q', // ID of the folder containing production data
   dumpfolder: '1zFsCLutd5pboDamsClZZBRsvPHB6QDwu', // ID of the folder where the summary spreadsheet will be saved
@@ -28,26 +28,29 @@ function processFolder() {
     const opmetafile = Drive.Files.create(opmetadata); // Create the new file (requires 'Drive API' Advanced Drive Service)
     const opdatafile = SpreadsheetApp.openById(opmetafile.id); // Open the newly created spreadsheet
     setupSummarySheet(opdatafile.getSheets()[0]); // Prepare and format the summary sheet
-    
+
     const datafileid = opdatafile.getId(); // Get the ID of the output data file
     const inputfiles = DriveApp.getFolderById(infolderid).getFilesByType(MimeType.GOOGLE_SHEETS); // Get all Google Sheets files in the input folder
-    
+
+    const rowsToAppend = [];
     let filenumber = 0;
-    while (inputfiles.hasNext()) { 
-      processInputFile(inputfiles.next().getId(), datafileid); 
+    while (inputfiles.hasNext()) {
+      const inputfile = inputfiles.next();
+      rowsToAppend.push(...processInputFile(inputfile.getId(), datafileid));
       filenumber++;
       if (filenumber % 10 === 0) Logger.log(`Processed ${filenumber} files`); // Log progress every 10 files
     }
-    
+
     const ss = SpreadsheetApp.openById(datafileid); // Open the summary spreadsheet
     const ts = ss.getSheetByName('TRADE SUMMARY'); // Get the summary sheet
-    
+    ts.getRange(ts.getLastRow() + 1, 1, rowsToAppend.length, rowsToAppend[0].length).setValues(rowsToAppend); // Append all rows in one go
+
     if (ts && ts.getLastRow() > 1) {
       formatSummarySheet(ts); // Format the summary sheet if it contains data
     } else {
       Logger.log("No data to format in summary sheet");
     }
-    
+
     createPivotTables(datafileid); // Create pivot tables in the summary report
     summarizeByDate(datafileid); // New function to summarize totals by date
 
@@ -73,48 +76,41 @@ function setupSummarySheet(summarysheet) {
     ['DEV', '=IFERROR(ROUND(STDEV(C8:C),2),0)'], // Standard deviation, rounded to 2 decimal places (updated to start from row 8)
     ['TRX', 'GAIN'] // New row for transaction gain (placeholder, formula to be implemented)
   ];
-  
+
   summarysheet.setName('TRADE SUMMARY').setHiddenGridlines(true).getDataRange().setFontFamily('Oswald'); // Set the name of the sheet, hide gridlines, and set the font family for the entire range
-  summarysheet.getRange(1, 1, rowheaders.length, 3).setBackground('#000000').setFontColor('#ffffff'); // Set background and font color for the header area (now includes 7 rows)
+  summarysheet.getRange(1, 1, rowheaders.length, 4).setBackground('#000000').setFontColor('#ffffff'); // Set background and font color for the header area (now includes 7 rows and 4 columns)
   summarysheet.getRange(1, 2, rowheaders.length, rowheaders[0].length).setValues(rowheaders); // Set values for row headers and formulas
   summarysheet.getRange(1, 2, rowheaders.length, 1).setHorizontalAlignment('right'); // Align row headers (first column) to the right
-  summarysheet.getRange(1, 3, rowheaders.length, 1).setHorizontalAlignment('right'); // NEW: Right-justify column C of the header row
-  summarysheet.setFrozenRows(7); // Freeze the top 7 rows (increased from 6 to account for the new row)
+  summarysheet.getRange(1, 3, rowheaders.length, 1).setHorizontalAlignment('right'); // Right-justify column C of the header row
+  summarysheet.getRange(7, 4).setValue('OPENED').setHorizontalAlignment('right'); // Add the new header and right-align it
+  summarysheet.setFrozenRows(7); // Freeze the top 7 rows
 }
 
 /**
- * Processes each sheet in the input spreadsheet and appends relevant data to the output spreadsheet.
+ * Processes each sheet in the input spreadsheet and returns rows to append.
  *
  * @param {string} ipssid - The ID of the input spreadsheet.
  * @param {string} opssid - The ID of the output spreadsheet.
+ * @return {Array} rows - The rows to append to the summary sheet.
  */
 function processInputFile(ipssid, opssid) {
+  const rows = [];
   try {
     const ipss = SpreadsheetApp.openById(ipssid); // Open the input spreadsheet
-    const opss = SpreadsheetApp.openById(opssid); // Open the output spreadsheet
-    const opssname = opss.getSheetByName('TRADE SUMMARY');
     const ipssname = ipss.getName(); // Get the name of the input spreadsheet
-    
-    if (!opssname) { throw new Error('TRADE SUMMARY sheet not found in the output spreadsheet'); }
-    
+
     ipss.getSheets().forEach(sheet => {
       const worksheet = sheet.getName();
-      Logger.log(`Processing sheet: ${worksheet}`);
-      
       const result = stringSearch(sheet, config.textsearch); // Search for the total trade value
       if (result !== null) {
         const positionOpenDate = sheet.getRange('B3').getValue(); // Get the position open date
-        opssname.appendRow([ipssname, worksheet, result, positionOpenDate]); // Append the found data and position open date to the output spreadsheet
-        Logger.log(`Processed ${ipssname} TRADE ${worksheet} [ ${result} USD ] on ${positionOpenDate}.`);
-      } else {
-        Logger.log(`No "${config.textsearch}" found in ${ipssname} TRADE ${worksheet}`);
+        rows.push([ipssname, worksheet, result, positionOpenDate]); // Collect the data to append later
       }
     });
-    
-    Logger.log(`Completed processing file ${ipssid}`);
   } catch (error) {
     Logger.log(`Error processing file ${ipssid}: ${error.message}`);
   }
+  return rows;
 }
 
 /**
@@ -150,7 +146,7 @@ function formatSummarySheet(sheet) {
   try {
     const lr = sheet.getLastRow();
     const lc = sheet.getLastColumn();
-    
+
     Logger.log(`Formatting summary sheet. Rows: ${lr}, Columns: ${lc}`);
 
     if (lr < 8 || lc < 3) { // Changed from 7 to 8 to account for the new header row
@@ -159,49 +155,23 @@ function formatSummarySheet(sheet) {
     }
 
     // Set border for all data in the sheet
-    Logger.log('Applying borders...');
     sheet.getRange(1, 1, lr, lc).setBorder(true, true, true, true, true, true);
 
     // Format numbers as currency, but only if the column exists
     if (lc >= 3) {
-      Logger.log('Formatting currency...');
       sheet.getRange(2, 3, lr - 1, 1).setNumberFormat('$#,##0.00');
     }
-    
+
     // Add alternating row colors
     if (lr > 8) { // Changed from 7 to 8 to account for the new header row
-      Logger.log('Applying alternating colors...');
       const range = sheet.getRange(8, 1, lr - 7, lc); // Changed from 7 to 8
       const blend = createAlternatingColors(lr - 7, lc); // Changed from 6 to 7
-      Logger.log(`Created colors array with ${blend.length} rows and ${blend[0].length} columns`);
       range.setBackgrounds(blend);
     }
-    
-    Logger.log(`Successfully formatted summary sheet. Rows: ${lr}, Columns: ${lc}`);
   } catch (error) {
     Logger.log(`Error in formatSummarySheet: ${error.message}`);
     Logger.log(`Error occurred at: ${error.stack}`);
-    // Log the current state of the sheet for debugging
-    Logger.log(`Sheet state - Name: ${sheet.getName()}, Rows: ${sheet.getLastRow()}, Columns: ${sheet.getLastColumn()}`);
-    
-    // Log the content of the sheet for further debugging
-    const content = sheet.getRange(1, 1, sheet.getLastRow(), sheet.getLastColumn()).getValues();
-    Logger.log(`Sheet content: ${JSON.stringify(content)}`);
   }
-}
-
-/**
- * Creates an array of alternating background colors for rows.
- *
- * @param {number} numRows - The number of rows to create colors for.
- * @param {number} numCols - The number of columns to create colors for.
- * @return {string[][]} An array of color strings for each row.
- */
-function createAlternatingColors(numRows, numCols) {
-  // Create a 2D array with alternating colors
-  // Even-indexed rows (0, 2, 4, ...) are white (#ffffff)
-  // Odd-indexed rows (1, 3, 5, ...) are light gray (#f3f3f3)
-  return Array(numRows).fill().map((_, i) => Array(numCols).fill((i % 2 === 0) ? '#ffffff' : '#f3f3f3'));
 }
 
 /**
@@ -247,27 +217,27 @@ function createPivotTable(ssid, sheetName, rowGroupIndex, colGroupIndex, pivotFu
     const sc = 8; // Start from row 8 for the actual data (row after headers)
     const lr = sn.getLastRow();
     const lc = sn.getLastColumn();
-    
+
     Logger.log(`Creating pivot table ${sheetName}. Source data: Rows: ${lr}, Columns: ${lc}`);
-    
+
     if (lr < sc || lc < 3) {
       Logger.log(`Insufficient data for pivot table ${sheetName}. Rows: ${lr}, Columns: ${lc}`);
       return;
     }
-    
+
     const pr = sn.getRange(sc, 1, lr - sc + 1, lc); // Define the range of the Pivot Table source data
     Logger.log(`Pivot table range: ${pr.getA1Notation()}`);
     Logger.log(`Pivot table range dimensions: Rows: ${pr.getNumRows()}, Columns: ${pr.getNumColumns()}`);
-    
+
     const ps = ss.insertSheet(sheetName); // Create a new sheet for the pivot table
     const pt = ps.getRange('A1').createPivotTable(pr); // Create the pivot table in the new sheet
-    
+
     // Set the row group and its header
     const rg = pt.addRowGroup(rowGroupIndex);
     rg.showTotals(true);
     rg.setDisplayName(sn.getRange(hr, rowGroupIndex).getValue()); // Set the header from row 7
     Logger.log(`Added row group: ${rowGroupIndex}`);
-    
+
     if (colGroupIndex <= lc && sheetName !== 'NUMPIVOT') {
       // Set the column group and its header
       const cg = pt.addColumnGroup(colGroupIndex);
@@ -275,15 +245,15 @@ function createPivotTable(ssid, sheetName, rowGroupIndex, colGroupIndex, pivotFu
       cg.setDisplayName(sn.getRange(hr, colGroupIndex).getValue()); // Set the header from row 7
       Logger.log(`Added column group: ${colGroupIndex}`);
     }
-    
+
     const vc = sheetName === 'NUMPIVOT' ? 2 : Math.min(3, lc);
     const pv = pt.addPivotValue(vc, pivotFunction);
     // Set the value header
     pv.setDisplayName(sn.getRange(hr, vc).getValue()); // Set the header from row 7
     Logger.log(`Added pivot value: Column ${vc}, Function: ${pivotFunction}`);
-    
+
     formatPivotTable(ps, true); // Always apply formatting, regardless of pivot table type
-    
+
     Logger.log(`Successfully created pivot table ${sheetName}`);
   } catch (error) {
     Logger.log(`Error creating pivot table ${sheetName}: ${error.message}`);
@@ -304,12 +274,12 @@ function createSummaryPivotTable(ssid) {
     const sc = 8; // Start from row 8 for the actual data (row after headers)
     const lr = sn.getLastRow();
     const lc = Math.min(sn.getLastColumn(), 3); // Ensure we don't exceed 3 columns
-    
+
     if (lr < sc || lc < 3) {
       Logger.log('Insufficient data for summary pivot table');
       return;
     }
-    
+
     const pr = sn.getRange(sc, 1, lr - sc + 1, lc); // Define the range of the Pivot Table source data
     const ps = ss.insertSheet('TICKER PERFORMANCE');
     const pt = ps.getRange('A1').createPivotTable(pr);
@@ -326,9 +296,9 @@ function createSummaryPivotTable(ssid) {
     // Set the sum value and its header
     const sv = pt.addPivotValue(3, SpreadsheetApp.PivotTableSummarizeFunction.SUM);
     sv.setDisplayName(sn.getRange(hr, 3).getValue() + ' Sum'); // Set the header from row 7 + ' Sum'
-    
+
     formatPivotTable(ps, true);
-    
+
     Logger.log('Successfully created summary pivot table');
   } catch (error) {
     Logger.log(`Error creating summary pivot table: ${error.message}`);
@@ -346,12 +316,12 @@ function formatPivotTable(sh, formatAsCurrency) {
   const sn = sh.getName();
   const lr = sh.getLastRow();
   const lc = sh.getLastColumn();
-  
+
   Logger.log(`Formatting pivot table ${sn}. Rows: ${lr}, Columns: ${lc}`);
 
   // Freeze the first row for all pivot tables
   sh.setFrozenRows(1);
-  
+
   sh.setFrozenColumns(1); // Freeze the header column
   dr.setFontFamily('Oswald'); // Use the 'Oswald' font in the data range
   dr.setBorder(true, true, true, true, true, true); // Apply a border to every cell in the data range
@@ -375,7 +345,7 @@ function formatPivotTable(sh, formatAsCurrency) {
     const ra = sh.getRange(2, 1, lr - 1, lc);
     ra.setBackgrounds(createAlternatingColors(lr - 1, lc));
   }
-  
+
   Logger.log(`Successfully formatted pivot table ${sn}`);
 }
 
@@ -389,7 +359,11 @@ function summarizeByDate(ssid) {
   try {
     const ss = SpreadsheetApp.openById(ssid);
     const ts = ss.getSheetByName('TRADE SUMMARY');
-    const summarySheet = ss.insertSheet('SUMMARY BY DATE');
+    let summarySheet = ss.getSheetByName('SUMMARY BY DATE');
+    if (summarySheet) {
+      ss.deleteSheet(summarySheet);
+    }
+    summarySheet = ss.insertSheet('SUMMARY BY DATE');
 
     const dataRange = ts.getDataRange().getValues();
     const dateSummary = {};
@@ -399,38 +373,83 @@ function summarizeByDate(ssid) {
       const [assetName, tradeNumber, total, openDate] = row;
       const formattedDate = formatDate(openDate);
       if (!dateSummary[formattedDate]) {
-        dateSummary[formattedDate] = 0;
+        dateSummary[formattedDate] = { count: 0, total: 0 };
       }
-      dateSummary[formattedDate] += total;
+      dateSummary[formattedDate].count++;
+      dateSummary[formattedDate].total += total;
     });
 
-    const summaryData = [['Date', 'Total']];
+    const summaryData = [['Date', 'Count', 'Total']];
     for (let date in dateSummary) {
-      summaryData.push([date, dateSummary[date]]);
+      summaryData.push([date, dateSummary[date].count, dateSummary[date].total]);
     }
 
     summarySheet.getRange(1, 1, summaryData.length, summaryData[0].length).setValues(summaryData);
 
-    Logger.log('Successfully summarized totals by date.');
+    // Apply formatting
+    const lastRow = summarySheet.getLastRow();
+    const lastColumn = summarySheet.getLastColumn();
+
+    // Set headers
+    summarySheet.getRange(1, 1, 1, lastColumn).setBackground('#000000').setFontColor('#ffffff');
+
+    // Format date column
+    summarySheet.getRange(2, 1, lastRow - 1, 1).setNumberFormat('MM/dd/yyyy');
+
+    // Format count column
+    summarySheet.getRange(2, 2, lastRow - 1, 1).setNumberFormat('#,##0');
+
+    // Format total column
+    summarySheet.getRange(2, 3, lastRow - 1, 1).setNumberFormat('$#,##0.00');
+
+    // Apply borders, font family, and alternating colors
+    summarySheet.getRange(1, 1, lastRow, lastColumn).setBorder(true, true, true, true, true, true)
+                .setFontFamily('Oswald');
+    summarySheet.setHiddenGridlines(true);
+
+    if (lastRow > 2) {
+      const range = summarySheet.getRange(2, 1, lastRow - 1, lastColumn);
+      range.setBackgrounds(createAlternatingColors(lastRow - 1, lastColumn));
+    }
+
+    // Create a pivot table
+    createDateSummaryPivotTable(ss, summarySheet.getRange(1, 1, lastRow, lastColumn));
+
+    Logger.log('Successfully summarized and formatted totals by date.');
   } catch (error) {
     Logger.log(`Error in summarizeByDate: ${error.message}`);
   }
 }
 
-/**
- * Formats the date string to only include the first four space-delimited strings.
+function createDateSummaryPivotTable(ss, sourceRange) {
+  const pivotSheet = ss.insertSheet('DATE SUMMARY PIVOT');
+  const pivotTable = pivotSheet.getRange('A1').createPivotTable(sourceRange);
+
+  // Set up the pivot table
+  const rowGroup = pivotTable.addRowGroup(1); // Group by Date
+  rowGroup.showTotals(true);
+
+  const countValue = pivotTable.addPivotValue(2, SpreadsheetApp.PivotTableSummarizeFunction.SUM);
+  countValue.setDisplayName('Trade Count');
+
+  const totalValue = pivotTable.addPivotValue(3, SpreadsheetApp.PivotTableSummarizeFunction.SUM);
+  totalValue.setDisplayName('Total Value');
+
+  // Format the pivot table
+  formatPivotTable(pivotSheet, true);
+}
+
+/*
+ * Formats the date string to only include the date part from "6/6/2024 12:37:38".
  *
  * @param {string} dateStr - The full date string from the spreadsheet.
  * @return {string} The formatted date string.
  */
 function formatDate(dateStr) {
   try {
-    const parts = dateStr.split(' ');
-    if (parts.length >= 4) {
-      return `${parts[0]} ${parts[1]} ${parts[2]} ${parts[3]}`;
-    } else {
-      return dateStr; // Return the original date string if it doesn't have at least 4 parts
-    }
+    const dateObject = new Date(dateStr);
+    const formattedDate = Utilities.formatDate(dateObject, Session.getScriptTimeZone(), 'MM/dd/yyyy');
+    return formattedDate;
   } catch (error) {
     Logger.log(`Error formatting date string: ${error.message}`);
     return dateStr; // Return the original date string in case of error
